@@ -1,0 +1,72 @@
+import numpy as np
+from numba import cuda
+import math
+from sklearn.datasets import load_wine
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+# Load dataset Wine dari sklearn
+wine = load_wine()
+X = wine.data.astype(np.float32)  # Fitur
+y = wine.target.astype(np.int32)  # Label
+
+# Skala fitur agar lebih seragam
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+
+# Bagi data menjadi data latih dan data uji
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Tetapkan parameter K untuk KNN
+k = 5  # Jumlah tetangga terdekat
+
+# Fungsi CUDA untuk menghitung jarak Euclidean
+@cuda.jit
+def calculate_distances(train_data, query_point, distances):
+    idx = cuda.grid(1)
+    if idx < train_data.shape[0]:
+        distance = 0.0
+        for j in range(train_data.shape[1]):
+            diff = train_data[idx, j] - query_point[j]
+            distance += diff * diff
+        distances[idx] = math.sqrt(distance)
+
+def knn_predict(X_train, y_train, query_point, k):
+    num_samples = X_train.shape[0]
+    
+    # Alokasi array untuk hasil jarak
+    distances = np.zeros(num_samples, dtype=np.float32)
+    
+    # Pindahkan data ke device (GPU)
+    d_train_data = cuda.to_device(X_train)
+    d_query_point = cuda.to_device(query_point)
+    d_distances = cuda.to_device(distances)
+    
+    # Tentukan jumlah thread per blok dan jumlah blok
+    threadsperblock = 128
+    blockspergrid = (num_samples + (threadsperblock - 1)) // threadsperblock
+    
+    # Jalankan kernel CUDA untuk menghitung jarak
+    calculate_distances[blockspergrid, threadsperblock](d_train_data, d_query_point, d_distances)
+    
+    # Pindahkan hasil jarak kembali ke host
+    distances = d_distances.copy_to_host()
+    
+    # Ambil k jarak terdekat dan tentukan kelas mayoritas
+    nearest_indices = distances.argsort()[:k]
+    nearest_labels = y_train[nearest_indices]
+    predicted_label = np.bincount(nearest_labels).argmax()
+    
+    return predicted_label
+
+# Prediksi untuk setiap titik di data uji
+correct = 0
+for i in range(len(X_test)):
+    predicted_label = knn_predict(X_train, y_train, X_test[i], k)
+    true_label = y_test[i]
+    correct += (predicted_label == true_label)
+    print(f"Data uji ke-{i + 1}: Prediksi={predicted_label}, Kelas Sebenarnya={true_label}")
+
+# Hitung akurasi
+accuracy = correct / len(X_test)
+print(f"\nAkurasi: {accuracy * 100:.2f}%")
